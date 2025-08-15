@@ -307,9 +307,9 @@ class EnhancedImageColourTransferNode:
             img = modified_val * img + (1.0 - modified_val) * ori_img
 
         if scale_rather_than_clip:
-            img = np.clip(img, 0., 255.).astype(np.uint8)
+            img = EnhancedImageColourTransferNode.__normalize_array(img, 0., 255.).clip(img, 0., 255.).astype(np.uint8)
         else:
-            img = EnhancedImageColourTransferNode.__normalize_array(img, 0., 255.).clip(img, 0, 255).astype(np.uint8)
+            img = np.clip(img, 0., 255.).astype(np.uint8)
 
         return img
 
