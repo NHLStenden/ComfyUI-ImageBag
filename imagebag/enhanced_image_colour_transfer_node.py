@@ -48,7 +48,7 @@ class EnhancedImageColourTransferNode:
                 "modified_val": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "extra_shading": ("BOOLEAN", {"default": True}),
                 "shader_val": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "scale_rather_than_clip": ("BOOLEAN", {"default": True}),
+                "scale_vs_clip": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "tint_val": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "saturation_val": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.01})
             }
@@ -62,7 +62,7 @@ class EnhancedImageColourTransferNode:
 
     # ------------------------- Public entry -------------------------
 
-    def transfer(self, source_image: torch.Tensor, target_image: torch.Tensor, cross_covariance_limit: float, reshaping_iteration: int, modified_val: float, extra_shading: bool, shader_val: float, scale_rather_than_clip: bool, tint_val: float, saturation_val: float) -> Tuple[torch.Tensor]:
+    def transfer(self, source_image: torch.Tensor, target_image: torch.Tensor, cross_covariance_limit: float, reshaping_iteration: int, modified_val: float, extra_shading: bool, shader_val: float, scale_vs_clip: float, tint_val: float, saturation_val: float) -> Tuple[torch.Tensor]:
         _src = EnhancedImageColourTransferNode.__tensor_to_rgb255(source_image)
         _tgt = EnhancedImageColourTransferNode.__tensor_to_rgb255(target_image)
 
@@ -73,7 +73,7 @@ class EnhancedImageColourTransferNode:
         _core = self.__core_processing(_tgt,_src, reshaping_iteration= reshaping_iteration, cross_covariance_limit= cross_covariance_limit, shader_val= shader_val)
         _res = EnhancedImageColourTransferNode.__adjust_saturation(_core, _tgt, saturation_val= saturation_val)
         _shaded = EnhancedImageColourTransferNode.__full_shading(_res, _tgt, _src, extra_shading= extra_shading, shader_val = shader_val)
-        _final = EnhancedImageColourTransferNode.__final_adjustment(_shaded, _tgt, tint_val= tint_val, modified_val= modified_val, scale_rather_than_clip= scale_rather_than_clip)
+        _final = EnhancedImageColourTransferNode.__final_adjustment(_shaded, _tgt, tint_val= tint_val, modified_val= modified_val, scale_vs_clip= scale_vs_clip)
         _final2 = EnhancedImageColourTransferNode.__rgb255_to_tensor(_final)
         return (_final2,)
 
@@ -288,7 +288,7 @@ class EnhancedImageColourTransferNode:
         return normalized_array
 
     @staticmethod
-    def __final_adjustment(img: np.ndarray, ori_img: np.ndarray, tint_val: float = 1., modified_val: float = 1., scale_rather_than_clip: bool = True) -> np.ndarray:
+    def __final_adjustment(img: np.ndarray, ori_img: np.ndarray, tint_val: float = 1., modified_val: float = 1., scale_vs_clip: float = 1.) -> np.ndarray:
         # Implements a change to the tint of the final image and
         # its degree of modification if a change is specified.
 
@@ -306,11 +306,10 @@ class EnhancedImageColourTransferNode:
         if modified_val != 1.0:
             img = modified_val * img + (1.0 - modified_val) * ori_img
 
-        if scale_rather_than_clip:
-            img = np.clip(EnhancedImageColourTransferNode.__normalize_array(img, 0., 255.), 0., 255.).astype(np.uint8)
-        else:
-            img = np.clip(img, 0., 255.).astype(np.uint8)
-
+        scale = EnhancedImageColourTransferNode.__normalize_array(img, 0., 255.)
+        clip = np.clip(img, 0., 255.)
+        img = (scale * (1. - scale_vs_clip)) + (clip * scale_vs_clip))
+        img = np.clip(img, 0., 255.).astype(np.uint8)
         return img
 
     @staticmethod
