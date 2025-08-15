@@ -1,0 +1,20 @@
+[project]
+name = "imagebag"
+description = "A custom node package for ComfyUI featuring advanced image processing tools."
+version = "1.0.0"
+readme = "README.md"
+license = {file = "LICENSE"}
+
+dependencies = [
+    "torch",
+    "numpy",
+    "opencv-python"
+]
+    
+[project.urls]
+Repository = "https://github.com/NHLStenden/ComfyUI-ImageBag"
+
+[tool.comfy]
+PublisherId = "NHLStenden"
+DisplayName = "ImageBag"
+Icon = ""
