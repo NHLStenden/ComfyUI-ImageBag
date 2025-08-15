@@ -57,7 +57,7 @@ class EnhancedImageColourTransferNode:
     RETURN_NAMES = ("output",)
 
     FUNCTION = "transfer"
-    CATEGORY = "image"
+    CATEGORY = "image/preprocessing"
     OUTPUT_IS_LIST = (False,)
 
     # ------------------------- Public entry -------------------------
