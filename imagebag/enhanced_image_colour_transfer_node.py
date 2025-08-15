@@ -308,7 +308,7 @@ class EnhancedImageColourTransferNode:
 
         scale = EnhancedImageColourTransferNode.__normalize_array(img, 0., 255.)
         clip = np.clip(img, 0., 255.)
-        img = (scale * (1. - scale_vs_clip)) + (clip * scale_vs_clip))
+        img = (scale * (1. - scale_vs_clip)) + (clip * scale_vs_clip)
         img = np.clip(img, 0., 255.).astype(np.uint8)
         return img
 
