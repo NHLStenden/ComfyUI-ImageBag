@@ -54,7 +54,7 @@ class EnhancedImageColourTransferNode:
             }
         }
     RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("output",)
+    RETURN_NAMES = ("IMAGE",)
 
     FUNCTION = "transfer"
     CATEGORY = "image/preprocessors"
