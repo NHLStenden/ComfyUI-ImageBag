@@ -1,4 +1,4 @@
-from imagebag.enhanced_image_colour_transfer_node import EnhancedImageColourTransferNode
+from .imagebag.enhanced_image_colour_transfer_node import EnhancedImageColourTransferNode
 
 NODE_CLASS_MAPPINGS = {
     "EnhancedImageColourTransferNode": EnhancedImageColourTransferNode
