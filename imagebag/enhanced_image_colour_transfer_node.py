@@ -1,15 +1,6 @@
-# IMPLEMENTATION OF A FURTHER ENHANCED ADAPTATION
-# OF THE REINHARD COLOUR TRANSFER METHOD.
-#
-# Python coding by Minh Nguyen Hoang
-# https://github.com/minh-nguyenhoang
-# Original C++ implementation by Terry Johnson
-# https://github.com/TJCoding/Enhanced-Image-Colour-Transfer-2
-
-import numpy as np
+import math
 import torch
 from typing import Optional, Tuple
-from numpy.typing import ArrayLike, NDArray
 
 class EnhancedImageColourTransferNode:
     """
@@ -19,38 +10,43 @@ class EnhancedImageColourTransferNode:
       - source_image: torch.Tensor (B,H,W,3) float32 in [0,1]
       - target_image: torch.Tensor (B,H,W,3) float32 in [0,1]
 
-    Internal processing uses float32. Colour space here is the
+    Internal processing uses float32 Torch tensors. Colour space here is the
     Reinhard Lαβ (derived from log-LMS), NOT CIELAB.
     """
 
     # --- Constant transforms (class-level to avoid reallocation) ---
-    RGB2LMS = np.array([[0.3811, 0.5783, 0.0402],
-                        [0.1967, 0.7244, 0.0782],
-                        [0.0241, 0.1288, 0.8444]]).astype(np.float32)
-    LMS2LAB = np.array([[1/np.sqrt(3), 1/np.sqrt(3), 1/np.sqrt(3)],
-                        [1/np.sqrt(6), 1/np.sqrt(6), -2/np.sqrt(6)],
-                        [1/np.sqrt(2), -1/np.sqrt(2), 0]]).astype(np.float32)
-
-    INV_LMS2LAB = np.linalg.inv(LMS2LAB)
-    INV_RGB2LMS = np.linalg.inv(RGB2LMS)
+    RGB2LMS = torch.tensor(
+        [[0.3811, 0.5783, 0.0402],
+         [0.1967, 0.7244, 0.0782],
+         [0.0241, 0.1288, 0.8444]],
+        dtype=torch.float32
+    )
+    LMS2LAB = torch.tensor(
+        [[1.0 / math.sqrt(3.0),  1.0 / math.sqrt(3.0),  1.0 / math.sqrt(3.0)],
+         [1.0 / math.sqrt(6.0),  1.0 / math.sqrt(6.0), -2.0 / math.sqrt(6.0)],
+         [1.0 / math.sqrt(2.0), -1.0 / math.sqrt(2.0),  0.0]],
+        dtype=torch.float32
+    )
+    INV_LMS2LAB = torch.linalg.inv(LMS2LAB)
+    INV_RGB2LMS = torch.linalg.inv(RGB2LMS)
 
     def __init__(self):
         pass
 
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
                 "source_image": ("IMAGE",),
                 "target_image": ("IMAGE",),
                 "cross_covariance_limit": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "reshaping_iteration": ("INT", {"default": 1, "min": 1, "max": 10}),
-                "modified_val": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "modified_val": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.5, "step": 0.01}),
                 "extra_shading": ("BOOLEAN", {"default": True}),
-                "shader_val": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "shader_val": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.5, "step": 0.01}),
                 "scale_vs_clip": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "tint_val": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "saturation_val": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.01})
+                "tint_val": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.5, "step": 0.01}),
+                "saturation_val": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 2.0, "step": 0.01})
             }
         }
     RETURN_TYPES = ("IMAGE",)
@@ -62,70 +58,102 @@ class EnhancedImageColourTransferNode:
 
     # ------------------------- Public entry -------------------------
 
-    def transfer(self, source_image: torch.Tensor, target_image: torch.Tensor, cross_covariance_limit: float, reshaping_iteration: int, modified_val: float, extra_shading: bool, shader_val: float, scale_vs_clip: float, tint_val: float, saturation_val: float) -> Tuple[torch.Tensor]:
-        _src = EnhancedImageColourTransferNode.__tensor_to_rgb255(source_image)
-        _tgt = EnhancedImageColourTransferNode.__tensor_to_rgb255(target_image)
+    @torch.no_grad()
+    def transfer(
+        self,
+        source_image: torch.Tensor,
+        target_image: torch.Tensor,
+        cross_covariance_limit: float,
+        reshaping_iteration: int,
+        modified_val: float,
+        extra_shading: bool,
+        shader_val: float,
+        scale_vs_clip: float,
+        tint_val: float,
+        saturation_val: float
+    ) -> Tuple[torch.Tensor]:
 
-        # For a full explanation of parameter choices and the associated 
-        # methodology see the comments in the original C++ coding at
-        # https://github.com/TJCoding/Enhanced-Image-Colour-Transfer-2
+        # Ensure shapes: (B,H,W,3) float32 in [0,1]
+        assert source_image.ndim == 4 and source_image.shape[-1] == 3, "source_image must be (B,H,W,3)"
+        assert target_image.ndim == 4 and target_image.shape[-1] == 3, "target_image must be (B,H,W,3)"
+        device = target_image.device
+        self.__move_constants(device)
 
-        _core = self.__core_processing(_tgt,_src, reshaping_iteration= reshaping_iteration, cross_covariance_limit= cross_covariance_limit, shader_val= shader_val)
-        _res = EnhancedImageColourTransferNode.__adjust_saturation(_core, _tgt, saturation_val= saturation_val)
-        _shaded = EnhancedImageColourTransferNode.__full_shading(_res, _tgt, _src, extra_shading= extra_shading, shader_val = shader_val)
-        _final = EnhancedImageColourTransferNode.__final_adjustment(_shaded, _tgt, tint_val= tint_val, modified_val= modified_val, scale_vs_clip= scale_vs_clip)
-        _final2 = EnhancedImageColourTransferNode.__rgb255_to_tensor(_final)
-        return (_final2,)
+        # Work in 0..255 domain internally to match original algorithm
+        src255 = (source_image.clamp(0,1) * 255.0).to(torch.float32)
+        tgt255 = (target_image.clamp(0,1) * 255.0).to(torch.float32)
+
+        core = self.__core_processing(tgt255, src255,
+                                      cross_covariance_limit=cross_covariance_limit,
+                                      reshaping_iteration=reshaping_iteration,
+                                      shader_val=shader_val)
+        res = self.__adjust_saturation(core, tgt255, saturation_val=saturation_val)
+        shaded = self.__full_shading(res, tgt255, src255,
+                                     extra_shading=extra_shading, shader_val=shader_val)
+        final = self.__final_adjustment(shaded, tgt255,
+                                        tint_val=tint_val, modified_val=modified_val,
+                                        scale_vs_clip=scale_vs_clip)
+
+        # Back to 0..1 float tensor
+        out = (final.clamp(0,255) / 255.0).to(target_image.dtype)
+        return (out,)
 
     # ----------------------- Color conversions ----------------------
 
-    # Here LAB refers to the L-alpha-beta colour space rather than CIELAB.
-    def __rgb_to_lab(self, img: np.ndarray) -> np.ndarray:
-        img = np.maximum(img, 1.)
-        img_lms = EnhancedImageColourTransferNode.__transform(img, self.RGB2LMS)
-        img = np.maximum(img, 1.)
-        img_lms = np.log(img_lms).astype(np.float32)/np.log(10)
-        img_lab = EnhancedImageColourTransferNode.__transform(img_lms, self.LMS2LAB)
-
+    def __rgb_to_lab(self, img: torch.Tensor) -> torch.Tensor:
+        # img: (B,H,W,3) in 0..255
+        img_lms = self.__transform(img, self.RGB2LMS)  # 0..255 -> LMS
+        img_lms = torch.clamp(img_lms, min=1.0)        # avoid log(0)
+        img_lms_log10 = torch.log10(img_lms)           # log10
+        img_lab = self.__transform(img_lms_log10, self.LMS2LAB)
         return img_lab
 
-    def __lab_to_rgb(self, img: np.ndarray) -> np.ndarray:
-        img_lms = EnhancedImageColourTransferNode.__transform(img, self.INV_LMS2LAB)
-        img_lms = np.exp(img_lms).astype(np.float32)
-        img_lms = np.power(img_lms, np.log(10.0))
-        img_rgb = EnhancedImageColourTransferNode.__transform(img_lms, self.INV_RGB2LMS)
-        return img_rgb
+    def __lab_to_rgb(self, img: torch.Tensor) -> torch.Tensor:
+        # img: (B,H,W,3) in Lαβ
+        lms_log10 = self.__transform(img, self.INV_LMS2LAB)
+        lms = torch.pow(10.0, lms_log10)               # inverse log10
+        rgb = self.__transform(lms, self.INV_RGB2LMS)
+        return rgb
 
     # -------------------- Core transfer pipeline --------------------
 
-    def __core_processing(self, tgt: np.ndarray, src: np.ndarray, cross_covariance_limit: float = 0.5, reshaping_iteration: int = 1, shader_val: float = 0.5 ) -> np.ndarray:
+    def __core_processing(
+        self,
+        tgt: torch.Tensor,
+        src: torch.Tensor,
+        cross_covariance_limit: float = 0.5,
+        reshaping_iteration: int = 1,
+        shader_val: float = 0.5
+    ) -> torch.Tensor:
+        # Convert to Lαβ
         tgtf = self.__rgb_to_lab(tgt)
         srcf = self.__rgb_to_lab(src)
 
-        tgt_mean, tgt_std = EnhancedImageColourTransferNode.__mean_stddev(tgtf)
-        src_mean, src_std = EnhancedImageColourTransferNode.__mean_stddev(srcf)
+        # Per-image, per-channel mean/std over H,W
+        tgt_mean, tgt_std = self.__mean_stddev(tgtf)
+        src_mean, src_std = self.__mean_stddev(srcf)
 
-        tgt_mean, tgt_std = tgt_mean.reshape(-1).astype(np.float32), tgt_std.reshape(-1).astype(np.float32)
-        src_mean, src_std = src_mean.reshape(-1).astype(np.float32), src_std.reshape(-1).astype(np.float32)
+        # Normalize
+        t_lab = (tgtf - tgt_mean) / (tgt_std + 1e-6)
+        s_lab = (srcf - src_mean) / (src_std + 1e-6)
 
-        t_lab = (tgtf - tgt_mean)/tgt_std
-        s_lab = (srcf - src_mean)/src_std
+        # Iterative channel conditioning on α,β (index 1,2)
+        for _ in range(max(0, reshaping_iteration - (reshaping_iteration + 1)//2)):
+            t_lab[..., 1:] = self.__channel_conditioning(t_lab[..., 1:], s_lab[..., 1:])
 
-        for j in range(reshaping_iteration,(reshaping_iteration + 1)//2, -1):
-            t_lab[...,1:] = EnhancedImageColourTransferNode.__channel_conditioning(t_lab[...,1:], s_lab[...,1:])
-        
+        t_lab = self.__adjust_covariance(t_lab, s_lab, cross_covariance_limit)
 
-        t_lab = EnhancedImageColourTransferNode.__adjust_covariance(t_lab, s_lab, cross_covariance_limit)
+        for _ in range((reshaping_iteration + 1)//2):
+            t_lab[..., 1:] = self.__channel_conditioning(t_lab[..., 1:], s_lab[..., 1:])
 
-        for j in range((reshaping_iteration + 1)//2):
-            t_lab[...,1:] = EnhancedImageColourTransferNode.__channel_conditioning(t_lab[...,1:], s_lab[...,1:])
-        
+        # Mix luminance stats between source and target using shader_val
+        src_mean_adj = src_mean.clone()
+        src_std_adj  = src_std.clone()
+        src_mean_adj[..., 0:1] = shader_val * src_mean[..., 0:1] + (1.0 - shader_val) * tgt_mean[..., 0:1]
+        src_std_adj[...,  0:1] = shader_val * src_std[...,  0:1] + (1.0 - shader_val) * tgt_std[...,  0:1]
 
-        src_mean, src_std = src_mean.copy(), src_std.copy()
-        src_mean[0] = shader_val*src_mean[0] + (1-shader_val)*tgt_mean[0]
-        src_std[0] = shader_val*src_std[0] + (1-shader_val)*tgt_std[0]
-
-        t_lab = t_lab * src_std + src_mean
+        # Re-scale to source stats
+        t_lab = t_lab * src_std_adj + src_mean_adj
 
         res_rgb = self.__lab_to_rgb(t_lab)
         return res_rgb
@@ -133,376 +161,248 @@ class EnhancedImageColourTransferNode:
     # ----------------------- Helper operations ----------------------
 
     @staticmethod
-    def __channel_conditioning(t_channel: np.ndarray, s_channel: np.ndarray) -> np.ndarray:
-        wval = float(0.25)
+    def __binary_threshold(src: torch.Tensor, thresh: float, maxval: float) -> Tuple[float, torch.Tensor]:
+        dst = torch.where(src > thresh, torch.tensor(maxval, dtype=src.dtype, device=src.device), torch.tensor(0.0, dtype=src.dtype, device=src.device))
+        return float(thresh), dst
 
-        _, mask = EnhancedImageColourTransferNode.__binary_threshold(s_channel, 0, 1)
-        mask = mask.astype(np.uint8)
+    def __channel_conditioning(self, t_channel: torch.Tensor, s_channel: torch.Tensor) -> torch.Tensor:
+        # t_channel, s_channel: (B,H,W,2) for α,β
+        wval = 0.25
 
-        s_mean_U = np.sum(s_channel*mask, axis= (0,1))/np.maximum(np.sum(mask, axis= (0,1)), 1) ## mean for element above 0
-        w_U = np.exp(-s_channel * wval/s_mean_U)
-        w_U = (1 - w_U) * (1 - w_U) 
-        w_mean = np.sum(w_U*mask, axis= (0,1))/np.maximum(np.sum(mask, axis= (0,1)), 1) ## mean for element above 0
-        channel_U = np.power(s_channel, 4)
-        s_mean_U = np.sum(channel_U*w_U*mask, axis= (0,1))/np.maximum(np.sum(mask, axis= (0,1)), 1)/w_mean
+        # --- Source stats for U (s > 0) and L (s <= 0) ---
+        _, mask = self.__binary_threshold(s_channel, 0.0, 1.0)
+        mask = mask.to(dtype=torch.float32)
+        inv_mask = 1.0 - mask
 
-        inv_mask = 1 - mask
-        s_mean_L = np.sum(s_channel*inv_mask, axis= (0,1))/np.maximum(np.sum(inv_mask, axis= (0,1)), 1) ## mean for element above 0
+        def weighted_fourth_power_mean(x, m):
+            # x: (B,H,W,2), m: 0/1 mask same shape
+            # compute means per-batch, per-channel over H,W
+            # First simple mean for scale in weights
+            denom = torch.clamp(m.sum(dim=(1,2), keepdim=True), min=1.0)
+            mean1 = (x * m).sum(dim=(1,2), keepdim=True) / denom
+            w = torch.exp(-x * (wval / (mean1 + 1e-6)))
+            w = (1.0 - w) * (1.0 - w)
+            w_mean = (w * m).sum(dim=(1,2), keepdim=True) / torch.clamp(denom, min=1.0)
+            x4 = torch.pow(x, 4.0)
+            mean4 = (x4 * w * m).sum(dim=(1,2), keepdim=True) / (torch.clamp(denom, min=1.0) * (w_mean + 1e-6))
+            return mean4, w
 
-        w_L = np.exp(-s_channel * wval/s_mean_L)
-        w_L = (1 - w_L) * (1 - w_L) 
-        w_mean = np.sum(w_L*inv_mask, axis= (0,1))/np.maximum(np.sum(inv_mask, axis= (0,1)), 1) ## mean for element above 0
-        channel_L = np.power(s_channel, 4)
-        s_mean_L = np.sum(channel_L*w_L*inv_mask, axis= (0,1))/np.maximum(np.sum(inv_mask, axis= (0,1)), 1)/w_mean
+        s_mean_U, w_U_s = weighted_fourth_power_mean(s_channel, mask)
+        s_mean_L, w_L_s = weighted_fourth_power_mean(s_channel, inv_mask)
 
+        # --- Target stats (t_channel) ---
+        _, tmask = self.__binary_threshold(t_channel, 0.0, 1.0)
+        tmask = tmask.to(dtype=torch.float32)
+        tinv = 1.0 - tmask
 
-        _, mask = EnhancedImageColourTransferNode.__binary_threshold(t_channel, 0, 1)
-        mask = mask.astype(np.uint8)
+        t_mean_U, w_U_t = weighted_fourth_power_mean(t_channel, tmask)
+        t_mean_L, w_L_t = weighted_fourth_power_mean(t_channel, tinv)
 
-        t_mean_U = np.sum(t_channel*mask, axis= (0,1))/np.maximum(np.sum(mask, axis= (0,1)), 1) ## mean for element above 0
-        w_U = np.exp(-t_channel * wval/t_mean_U)
-        w_U = (1 - w_U) * (1 - w_U) 
-        w_mean = np.sum(w_U*mask, axis= (0,1))/np.maximum(np.sum(mask, axis= (0,1)), 1) + 1e-6 ## mean for element above 0
-        channel_U = np.power(t_channel, 4)
-        t_mean_U = np.sum(channel_U*w_U*mask, axis= (0,1))/np.maximum(np.sum(mask, axis= (0,1)), 1)/w_mean
+        # Re-shape with k factors
+        kU = torch.sqrt(torch.sqrt((s_mean_U + 1e-6) / (t_mean_U + 1e-6)))
+        kL = torch.sqrt(torch.sqrt((s_mean_L + 1e-6) / (t_mean_L + 1e-6)))
 
-        inv_mask = 1 - mask
-        t_mean_L = np.sum(t_channel*inv_mask, axis= (0,1))/np.maximum(np.sum(inv_mask, axis= (0,1)), 1) ## mean for element above 0
-        w_L = np.exp(-t_channel * wval/t_mean_L)
-        w_L = (1 - w_L) * (1 - w_L) 
-        w_mean = np.sum(w_L*inv_mask, axis= (0,1))/np.maximum(np.sum(inv_mask, axis= (0,1)), 1) ## mean for element above 0
-        channel_L = np.power(t_channel, 4)
-        t_mean_L = np.sum(channel_L*w_L*inv_mask, axis= (0,1))/np.maximum(np.sum(inv_mask, axis= (0,1)), 1)/w_mean
+        t_channel_U = (1.0 + w_U_t * (kU - 1.0)) * t_channel
+        t_channel_L = (1.0 + w_L_t * (kL - 1.0)) * t_channel
 
-        k = np.sqrt(np.sqrt(s_mean_U/t_mean_U))
-        t_channel_U = (1 + w_U*(k-1))*t_channel
+        out = t_channel_U * tmask + t_channel_L * tinv
 
-        k = np.sqrt(np.sqrt(s_mean_L/t_mean_L))
-        t_channel_L = (1 + w_L*(k-1))*t_channel
+        # Normalize to zero-mean, unit-std over H,W per-batch per-channel
+        mean = out.mean(dim=(1,2), keepdim=True)
+        std  = out.std(dim=(1,2), keepdim=True) + 1e-6
+        out = (out - mean) / std
+        return out
 
-        t_chanel_normalized: np.ndarray = t_channel_U * mask + t_channel_L * inv_mask
-        t_mean, t_std = t_chanel_normalized.mean((0,1)), t_chanel_normalized.std((0,1))
+    def __adjust_covariance(self, t_lab: torch.Tensor, s_lab: torch.Tensor, cross_covariance_limit: float = 0.5) -> torch.Tensor:
+        out = t_lab.clone()
+        if cross_covariance_limit != 0.0:
+            tcross = (out[...,1] * out[...,2]).mean(dim=(1,2), keepdim=True)
+            scross = (s_lab[...,1] * s_lab[...,2]).mean(dim=(1,2), keepdim=True)
 
-        t_chanel_normalized = (t_chanel_normalized - t_mean)/t_std
+            W1 = 0.5 * torch.sqrt((1 + scross) / (1 + tcross) + 1e-6) + \
+                 0.5 * torch.sqrt((1 - scross) / (1 - tcross) + 1e-6)
+            W2 = 0.5 * torch.sqrt((1 + scross) / (1 + tcross) + 1e-6) - \
+                 0.5 * torch.sqrt((1 - scross) / (1 - tcross) + 1e-6)
 
-        return t_chanel_normalized
+            cond = torch.abs(W2) > (abs(cross_covariance_limit) * torch.abs(W1))
+            if cond.any():
+                W2 = torch.where(cond, torch.sign(W2) * (abs(cross_covariance_limit) * W1), W2)
+                norm = 1.0 / torch.sqrt(W1**2 + W2**2 + 2.0 * W1 * W2 * tcross + 1e-8)
+                W1 = W1 * norm
+                W2 = W2 * norm
 
-    @staticmethod
-    def __adjust_covariance(t_lab: np.ndarray, s_lab: np.ndarray, cross_covariance_limit: float = 0.5) -> np.ndarray:
-        t_lab = t_lab.copy()
-        if cross_covariance_limit != 0:
-            tcrosscorr = np.mean(t_lab[...,1] * t_lab[...,2], axis= (0,1))
-            scrosscorr = np.mean(s_lab[...,1] * s_lab[...,2], axis= (0,1))
-
-            W1 = 0.5 * np.sqrt((1 + scrosscorr) / (1 + tcrosscorr)) + \
-                0.5 * np.sqrt((1 - scrosscorr) / (1 - tcrosscorr))
-            W2 = 0.5 * np.sqrt((1 + scrosscorr) / (1 + tcrosscorr)) - \
-                0.5 * np.sqrt((1 - scrosscorr) / (1 - tcrosscorr))
-            
-            if abs(W2) > cross_covariance_limit * abs(W1):
-                W2 = np.copysign(cross_covariance_limit * W1, W2)
-                norm = 1.0 / np.sqrt(W1**2 + W2**2 + 2 * W1 * W2 * tcrosscorr)
-                W1 *= norm
-                W2 *= norm
-
-            z1 = t_lab[...,1].copy()
-            t_lab[...,1] = W1 * z1 + W2 * t_lab[...,2]
-            t_lab[...,2] = W1 * t_lab[...,2] + W2 * z1
-
-        return t_lab
+            z1 = out[...,1].clone()
+            out[...,1] = W1 * z1 + W2 * out[...,2]
+            out[...,2] = W1 * out[...,2] + W2 * z1
+        return out
 
     @staticmethod
-    def __adjust_saturation(img: np.ndarray, origin_img: np.ndarray, saturation_val: float = -1) -> np.ndarray:
-        # Convert images from RGB to HSV color space
-        img: np.ndarray = EnhancedImageColourTransferNode.__rgb2hsv(img.astype(np.float32))
-        origin_img: np.ndarray = EnhancedImageColourTransferNode.__rgb2hsv(origin_img.astype(np.float32))
+    def __rgb_to_gray(img: torch.Tensor) -> torch.Tensor:
+        # img: (B,H,W,3)
+        weights = torch.tensor([0.2989, 0.5870, 0.1140], dtype=img.dtype, device=img.device)
+        return (img * weights.view(1,1,1,3)).sum(dim=-1)
+
+    def __adjust_saturation(self, img: torch.Tensor, origin_img: torch.Tensor, saturation_val: float = -1.0) -> torch.Tensor:
+        # Convert to HSV
+        img_hsv = self.__rgb2hsv(img)
+        ori_hsv = self.__rgb2hsv(origin_img)
+
         if saturation_val < 0:
-            # Calculate saturation_val as the ratio of the max saturation value
-            # in the original image to the max value in the processed image
-            amax1 = np.max(img[...,1])
-            amax2 = np.max(origin_img[...,1])
-            saturation_val = amax2 / amax1
+            amax1 = img_hsv[...,1].amax(dim=(1,2), keepdim=True) + 1e-6
+            amax2 = ori_hsv[...,1].amax(dim=(1,2), keepdim=True)
+            saturation_val = (amax2 / amax1).clamp(min=0.0, max=10.0)  # broadcastable tensor
+        else:
+            saturation_val = torch.tensor(saturation_val, dtype=img.dtype, device=img.device)
 
-        if saturation_val != 1.:
-            # Compute weighted mix of the processed target and original saturation channels
-            origin_img[...,1] = img[...,1]*(saturation_val) + origin_img[...,1]*(1-saturation_val)
+        if not torch.allclose(saturation_val, torch.ones_like(img_hsv[...,1]).mean() * 1.0):
+            ori_hsv[...,1] = img_hsv[...,1] * saturation_val + ori_hsv[...,1] * (1.0 - saturation_val)
 
-            # Create a mask where the processed image's saturation exceeds the original target image's saturation
-            mask = EnhancedImageColourTransferNode.__binary_threshold(img[...,1] - origin_img[...,1], 0, 1)[1]
-            mask = mask.astype(np.uint8)
+            _, mask = self.__binary_threshold(img_hsv[...,1] - ori_hsv[...,1], 0.0, 1.0)
+            mask = mask.to(dtype=torch.float32)
 
-            # Create the modified reference saturation channel
-            origin_img[...,1] = origin_img[...,1] * mask + img[...,1]*(1-mask)
+            ori_hsv[...,1] = ori_hsv[...,1] * mask + img_hsv[...,1] * (1.0 - mask)
 
-            # Match the mean and standard deviation of the processed image's saturation channel
-            # to the modified reference saturation channel
-            tmean, tdev = img[...,1].mean((0,1)), img[...,1].std((0,1))
-            tmpmean, tmpdev = origin_img[...,1].mean((0,1)), origin_img[...,1].std((0,1))
+            tmean = img_hsv[...,1].mean(dim=(1,2), keepdim=True)
+            tdev  = img_hsv[...,1].std (dim=(1,2), keepdim=True) + 1e-6
+            tmpmean = ori_hsv[...,1].mean(dim=(1,2), keepdim=True)
+            tmpdev  = ori_hsv[...,1].std (dim=(1,2), keepdim=True) + 1e-6
 
-            tmp_ = img[...,1].copy().astype(np.float32)
-            img[...,1] = (tmp_ - tmean) / tdev * tmpdev + tmpmean
-        img = EnhancedImageColourTransferNode.__hsv2rgb(img)
+            img_hsv[...,1] = (img_hsv[...,1] - tmean) / tdev * tmpdev + tmpmean
+        else:
+            # keep img_hsv saturation
+            pass
 
-        return img
+        img_rgb = self.__hsv2rgb(img_hsv)
+        return img_rgb
 
-    @staticmethod
-    def __full_shading(img: np.ndarray, ori_img: np.ndarray, src_img: np.ndarray, extra_shading: bool = True, shader_val: float = 0.5) -> np.ndarray:
-        # Matches the grey shade distribution of the modified target image
-        # to that of a notional shader image which is a linear combination
-        # of the original target and source image as determined by 'shader_val'.
-
+    def __full_shading(self, img: torch.Tensor, ori_img: torch.Tensor, src_img: torch.Tensor, extra_shading: bool = True, shader_val: float = 0.5) -> torch.Tensor:
         if extra_shading:
-            # Convert images to grayscale
-            greyt = np.dot(ori_img[..., :3], [0.2989, 0.5870, 0.1140])
-            greyp = np.dot(img[..., :3], [0.2989, 0.5870, 0.1140])
-            greys = np.dot(src_img[..., :3], [0.2989, 0.5870, 0.1140])
+            greyt = self.__rgb_to_gray(ori_img)  # (B,H,W)
+            greyp = self.__rgb_to_gray(img)
+            greys = self.__rgb_to_gray(src_img)
 
-            # Standardize the grayscale images for the source and target
-            smean, sdev = np.mean(greys), np.std(greys)
-            tmean, tdev = np.mean(greyt), np.std(greyt)
-            greyt = (greyt - tmean) / tdev
+            smean = greys.mean(dim=(1,2), keepdim=True)
+            sdev  = greys.std (dim=(1,2), keepdim=True) + 1e-6
+            tmean = greyt.mean(dim=(1,2), keepdim=True)
+            tdev  = greyt.std (dim=(1,2), keepdim=True) + 1e-6
 
-            # Rescale the standardized grayscale target image
-            greyt = greyt * (shader_val * sdev + (1.0 - shader_val) * tdev) \
-                    + shader_val * smean + (1.0 - shader_val) * tmean
+            greyt_n = (greyt - tmean) / tdev
+            greyt_r = greyt_n * (shader_val * sdev + (1.0 - shader_val) * tdev) + shader_val * smean + (1.0 - shader_val) * tmean
 
-            # Ensure there are no zero or negative values in the grayscale images
-            min_val = 1.
-            greyp = np.maximum(greyp, min_val)  # Guard against zero divide
-            greyt = np.maximum(greyt, 0.0)      # Guard against negative values
+            greyp = torch.clamp(greyp, min=1.0)
+            greyt_r = torch.clamp(greyt_r, min=0.0)
 
-            # Rescale each color channel of the processed image
-            img = img / greyp[..., None] * greyt[..., None]
-
+            img = img / greyp.unsqueeze(-1) * greyt_r.unsqueeze(-1)
         return img
 
     @staticmethod
-    def __normalize_array(array: np.ndarray, desired_min: float, desired_max: float) -> np.ndarray:
-        array_min = np.min(array)
-        array_max = np.max(array)
-        normalized_array = (array - array_min) / (array_max - array_min) * (desired_max - desired_min) + desired_min
-        return normalized_array
+    def __normalize_array(arr: torch.Tensor, desired_min: float, desired_max: float) -> torch.Tensor:
+        arr_min = arr.amin(dim=(1,2,3), keepdim=True)
+        arr_max = arr.amax(dim=(1,2,3), keepdim=True)
+        scale = (arr - arr_min) / (arr_max - arr_min + 1e-6) * (desired_max - desired_min) + desired_min
+        return scale
 
-    @staticmethod
-    def __final_adjustment(img: np.ndarray, ori_img: np.ndarray, tint_val: float = 1., modified_val: float = 1., scale_vs_clip: float = 1.) -> np.ndarray:
-        # Implements a change to the tint of the final image and
-        # its degree of modification if a change is specified.
-
-        # If 100% tint is not specified, compute a weighted average
-        # of the processed image and its grayscale representation.
+    def __final_adjustment(self, img: torch.Tensor, ori_img: torch.Tensor, tint_val: float = 1.0, modified_val: float = 1.0, scale_vs_clip: float = 1.0) -> torch.Tensor:
         if tint_val != 1.0:
-            # Convert to grayscale
-            grey = np.dot(img[..., :3], [0.2989, 0.5870, 0.1140])[..., None]
-
-            # Apply the tint by adjusting each channel
+            grey = self.__rgb_to_gray(img).unsqueeze(-1)
             img = tint_val * img + (1.0 - tint_val) * grey
 
-        # If 100% image modification is not specified, compute a weighted average
-        # of the processed image and the original target image.
         if modified_val != 1.0:
             img = modified_val * img + (1.0 - modified_val) * ori_img
 
-        scale = EnhancedImageColourTransferNode.__normalize_array(img, 0., 255.)
-        clip = np.clip(img, 0., 255.)
-        img = (scale * (1. - scale_vs_clip)) + (clip * scale_vs_clip)
-        img = np.clip(img, 0., 255.).astype(np.uint8)
+        scale = self.__normalize_array(img, 0.0, 255.0)
+        clip  = img.clamp(0.0, 255.0)
+        img = scale * (1.0 - scale_vs_clip) + clip * scale_vs_clip
+        img = img.clamp(0.0, 255.0)
         return img
 
-    @staticmethod
-    def __tensor_to_rgb255(image: torch.Tensor) -> np.ndarray:
-        return (np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+    # -------------------- generic math helpers ---------------------
 
-    @staticmethod
-    def __rgb255_to_tensor(image: np.ndarray) -> torch.Tensor:
-        return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+    def __transform(self, src: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        # src: (B,H,W,3); m: (3,3)
+        return torch.matmul(src, m.t())
 
-    def __transform(src: ArrayLike, m: ArrayLike) -> NDArray[np.float32]:
-        """
-        Pure NumPy replacement for cv2.transform.
-
-        Parameters
-        ----------
-        src : ArrayLike
-            Input array with shape (..., N), e.g. (H, W, N).
-        m : ArrayLike
-            Transformation matrix of shape (M, N) or (M, N+1).
-
-        Returns
-        -------
-        dst : NDArray[np.float32]
-            Transformed array with shape (..., M).
-        """
-        src_arr: NDArray[np.float32] = np.asarray(src, dtype=np.float32)
-        m_arr: NDArray[np.float32] = np.asarray(m, dtype=np.float32)
-
-        N = src_arr.shape[-1]
-        if m_arr.shape[1] == N:  # simple linear transform
-            dst = np.tensordot(src_arr, m_arr.T, axes=1)
-        elif m_arr.shape[1] == N + 1:  # affine transform
-            dst = np.tensordot(src_arr, m_arr[:, :-1].T, axes=1) + m_arr[:, -1]
-        else:
-            raise ValueError(
-                f"Matrix shape {m_arr.shape} incompatible with src shape {src_arr.shape}"
-            )
-
-        return dst.astype(np.float32)
-
-    def __mean_stddev(src: ArrayLike, mask: Optional[ArrayLike] = None) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
-        """
-        Pure NumPy replacement for cv2.meanStdDev.
-
-        Parameters
-        ----------
-        src : ArrayLike
-            Input array of shape (H, W[, C]) with 1 to 4 channels.
-        mask : Optional[ArrayLike], default=None
-            Optional mask of shape (H, W). Nonzero values indicate which
-            pixels are included in the calculation.
-
-        Returns
-        -------
-        mean : NDArray[np.float32]
-            Mean values per channel, shape (C, 1).
-        stddev : NDArray[np.float32]
-            Standard deviation per channel, shape (C, 1).
-        """
-        src_arr: NDArray[np.float32] = np.asarray(src, dtype=np.float32)
-
-        # Handle grayscale as single-channel
-        if src_arr.ndim == 2:
-            src_arr = src_arr[..., None]  # shape (H, W, 1)
-
-        H, W, C = src_arr.shape
-
+    def __mean_stddev(self, src: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        # src: (B,H,W,3)
         if mask is not None:
-            mask_arr: NDArray[np.bool_] = np.asarray(mask, dtype=bool)
-            if mask_arr.shape != (H, W):
-                raise ValueError(f"Mask shape {mask_arr.shape} does not match src shape {(H, W)}")
+            raise NotImplementedError("Masked mean/std not used in this pipeline.")
+        mean = src.mean(dim=(1,2), keepdim=True)  # (B,1,1,3)
+        std  = src.std (dim=(1,2), keepdim=True)  # (B,1,1,3)
+        return mean, std + 1e-6
 
-            # Apply mask to each channel
-            values = [src_arr[..., c][mask_arr] for c in range(C)]
-        else:
-            # Flatten all pixels per channel
-            values = [src_arr[..., c].ravel() for c in range(C)]
+    # ----------------------- HSV converters ------------------------
 
-        # Compute stats per channel
-        means = np.array([np.mean(v) if v.size > 0 else 0.0 for v in values], dtype=np.float32)
-        stds  = np.array([np.std(v)  if v.size > 0 else 0.0 for v in values], dtype=np.float32)
-
-        # Match OpenCV shape: (C, 1)
-        return means[:, None], stds[:, None]
-
-    def __binary_threshold(
-        src: ArrayLike,
-        thresh: float,
-        maxval: float
-    ) -> Tuple[float, NDArray[np.float32]]:
-        """
-        Pure NumPy replacement for cv2.threshold with THRESH_BINARY.
-
-        Parameters
-        ----------
-        src : ArrayLike
-            Input array (grayscale or multi-channel).
-        thresh : float
-            Threshold value.
-        maxval : float
-            Maximum value for THRESH_BINARY.
-
-        Returns
-        -------
-        retval : float
-            The used threshold value (same as OpenCV).
-        dst : NDArray[np.float32]
-            Thresholded output array, same shape as src.
-        """
-        src_arr: NDArray[np.float32] = np.asarray(src, dtype=np.float32)
-        dst = np.where(src_arr > thresh, maxval, 0).astype(np.float32)
-        return float(thresh), dst    
-
-    def __rgb2hsv(src: ArrayLike) -> NDArray[np.float32]:
-        """
-        Convert RGB image to HSV (OpenCV convention: H∈[0,180], S,V∈[0,255]).
-
-        Parameters
-        ----------
-        src : ArrayLike
-            Input RGB image, dtype uint8, shape (H, W, 3).
-
-        Returns
-        -------
-        dst : NDArray[np.uint8]
-            HSV image, same shape (H, W, 3).
-        """
-        src_arr = np.asarray(src, dtype=np.float32).astype(np.float32) / 255.0
-        r, g, b = src_arr[..., 0], src_arr[..., 1], src_arr[..., 2]
-
-        cmax = np.max(src_arr, axis=-1)
-        cmin = np.min(src_arr, axis=-1)
+    def __rgb2hsv(self, src: torch.Tensor) -> torch.Tensor:
+        # src: (B,H,W,3) in 0..255
+        x = (src / 255.0).clamp(0.0, 1.0)
+        r, g, b = x[...,0], x[...,1], x[...,2]
+        cmax = torch.max(x, dim=-1).values
+        cmin = torch.min(x, dim=-1).values
         delta = cmax - cmin
 
-        # Hue
-        hue = np.zeros_like(cmax)
+        hue = torch.zeros_like(cmax)
         mask = delta > 1e-6
-        idx = (cmax == r) & mask
-        hue[idx] = ((g - b)[idx] / delta[idx]) % 6
-        idx = (cmax == g) & mask
-        hue[idx] = (b - r)[idx] / delta[idx] + 2
-        idx = (cmax == b) & mask
-        hue[idx] = (r - g)[idx] / delta[idx] + 4
-        hue = hue * 30  # scale to [0,180]
+        # Cases
+        r_is_max = (cmax == r) & mask
+        g_is_max = (cmax == g) & mask
+        b_is_max = (cmax == b) & mask
 
-        # Saturation
-        sat = np.zeros_like(cmax)
-        sat[cmax > 0] = (delta[cmax > 0] / cmax[cmax > 0]) * 255
+        hue[r_is_max] = ((g - b)[r_is_max] / delta[r_is_max]) % 6.0
+        hue[g_is_max] = ((b - r)[g_is_max] / delta[g_is_max]) + 2.0
+        hue[b_is_max] = ((r - g)[b_is_max] / delta[b_is_max]) + 4.0
+        hue = hue * 30.0  # [0,180] like OpenCV
 
-        # Value
-        val = cmax * 255
+        sat = torch.zeros_like(cmax)
+        nonzero = cmax > 0
+        sat[nonzero] = (delta[nonzero] / cmax[nonzero])
+        sat = sat * 255.0
 
-        hsv = np.stack([hue, sat, val], axis=-1).astype(np.float32)
-        return hsv
+        val = cmax * 255.0
+        return torch.stack([hue, sat, val], dim=-1)
 
-
-    def __hsv2rgb(src: ArrayLike) -> NDArray[np.float32]:
-        """
-        Convert HSV image (OpenCV convention) to RGB.
-
-        Parameters
-        ----------
-        src : ArrayLike
-            HSV image, dtype uint8, shape (H, W, 3).
-            H∈[0,180], S,V∈[0,255].
-
-        Returns
-        -------
-        dst : NDArray[np.uint8]
-            RGB image, same shape (H, W, 3).
-        """
-        hsv_arr = np.asarray(src, dtype=np.float32).astype(np.float32)
-        h = hsv_arr[..., 0] * 2.0  # back to [0,360)
-        s = hsv_arr[..., 1] / 255.0
-        v = hsv_arr[..., 2] / 255.0
+    def __hsv2rgb(self, src: torch.Tensor) -> torch.Tensor:
+        # src: (B,H,W,3) with H in [0,180], S,V in [0,255]
+        h = src[...,0] * 2.0
+        s = src[...,1] / 255.0
+        v = src[...,2] / 255.0
 
         c = v * s
-        x = c * (1 - np.abs((h / 60.0) % 2 - 1))
+        h_ = h / 60.0
+        x = c * (1.0 - torch.abs(h_ % 2 - 1.0))
         m = v - c
 
-        r = np.zeros_like(h)
-        g = np.zeros_like(h)
-        b = np.zeros_like(h)
+        zeros = torch.zeros_like(h)
+        r = torch.zeros_like(h)
+        g = torch.zeros_like(h)
+        b = torch.zeros_like(h)
 
-        idx = (0 <= h) & (h < 60)
-        r[idx], g[idx], b[idx] = c[idx], x[idx], 0
-        idx = (60 <= h) & (h < 120)
-        r[idx], g[idx], b[idx] = x[idx], c[idx], 0
-        idx = (120 <= h) & (h < 180)
-        r[idx], g[idx], b[idx] = 0, c[idx], x[idx]
-        idx = (180 <= h) & (h < 240)
-        r[idx], g[idx], b[idx] = 0, x[idx], c[idx]
-        idx = (240 <= h) & (h < 300)
-        r[idx], g[idx], b[idx] = x[idx], 0, c[idx]
-        idx = (300 <= h) & (h < 360)
-        r[idx], g[idx], b[idx] = c[idx], 0, x[idx]
+        conds = [
+            (h >= 0)   & (h < 60),
+            (h >= 60)  & (h < 120),
+            (h >= 120) & (h < 180),
+            (h >= 180) & (h < 240),
+            (h >= 240) & (h < 300),
+            (h >= 300) & (h < 360),
+        ]
+        rgbs = [
+            (c, x, zeros),
+            (x, c, zeros),
+            (zeros, c, x),
+            (zeros, x, c),
+            (x, zeros, c),
+            (c, zeros, x),
+        ]
+        for cond, (rc, gc, bc) in zip(conds, rgbs):
+            r = torch.where(cond, rc, r)
+            g = torch.where(cond, gc, g)
+            b = torch.where(cond, bc, b)
 
-        rgb = np.stack([(r + m), (g + m), (b + m)], axis=-1)
-        return (rgb * 255).astype(np.float32)
+        rgb = torch.stack([r + m, g + m, b + m], dim=-1) * 255.0
+        return rgb
+    # ------------------- utility -------------------
+    def __move_constants(self, device: torch.device):
+        # move class-level constant tensors to the right device lazily
+        self.RGB2LMS = self.RGB2LMS.to(device)
+        self.LMS2LAB = self.LMS2LAB.to(device)
+        self.INV_LMS2LAB = self.INV_LMS2LAB.to(device)
+        self.INV_RGB2LMS = self.INV_RGB2LMS.to(device)

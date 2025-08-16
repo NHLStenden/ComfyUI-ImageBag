@@ -6,8 +6,7 @@ readme = "README.md"
 license = {file = "LICENSE"}
 
 dependencies = [
-    "torch",
-    "numpy"
+    "torch"
 ]
     
 [project.urls]
