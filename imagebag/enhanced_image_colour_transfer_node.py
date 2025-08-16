@@ -6,10 +6,10 @@
 # Original C++ implementation by Terry Johnson
 # https://github.com/TJCoding/Enhanced-Image-Colour-Transfer-2
 
-import cv2
 import numpy as np
 import torch
-from typing import Tuple
+from typing import Optional, Tuple
+from numpy.typing import ArrayLike, NDArray
 
 class EnhancedImageColourTransferNode:
     """
@@ -82,18 +82,18 @@ class EnhancedImageColourTransferNode:
     # Here LAB refers to the L-alpha-beta colour space rather than CIELAB.
     def __rgb_to_lab(self, img: np.ndarray) -> np.ndarray:
         img = np.maximum(img, 1.)
-        img_lms = cv2.transform(img, self.RGB2LMS)
+        img_lms = EnhancedImageColourTransferNode.__transform(img, self.RGB2LMS)
         img = np.maximum(img, 1.)
         img_lms = np.log(img_lms).astype(np.float32)/np.log(10)
-        img_lab = cv2.transform(img_lms, self.LMS2LAB)
+        img_lab = EnhancedImageColourTransferNode.__transform(img_lms, self.LMS2LAB)
 
         return img_lab
 
     def __lab_to_rgb(self, img: np.ndarray) -> np.ndarray:
-        img_lms = cv2.transform(img, self.INV_LMS2LAB)
+        img_lms = EnhancedImageColourTransferNode.__transform(img, self.INV_LMS2LAB)
         img_lms = np.exp(img_lms).astype(np.float32)
         img_lms = np.power(img_lms, np.log(10.0))
-        img_rgb = cv2.transform(img_lms, self.INV_RGB2LMS)
+        img_rgb = EnhancedImageColourTransferNode.__transform(img_lms, self.INV_RGB2LMS)
         return img_rgb
 
     # -------------------- Core transfer pipeline --------------------
@@ -102,8 +102,8 @@ class EnhancedImageColourTransferNode:
         tgtf = self.__rgb_to_lab(tgt)
         srcf = self.__rgb_to_lab(src)
 
-        tgt_mean, tgt_std = cv2.meanStdDev(tgtf)
-        src_mean, src_std = cv2.meanStdDev(srcf)
+        tgt_mean, tgt_std = EnhancedImageColourTransferNode.__mean_stddev(tgtf)
+        src_mean, src_std = EnhancedImageColourTransferNode.__mean_stddev(srcf)
 
         tgt_mean, tgt_std = tgt_mean.reshape(-1).astype(np.float32), tgt_std.reshape(-1).astype(np.float32)
         src_mean, src_std = src_mean.reshape(-1).astype(np.float32), src_std.reshape(-1).astype(np.float32)
@@ -136,7 +136,7 @@ class EnhancedImageColourTransferNode:
     def __channel_conditioning(t_channel: np.ndarray, s_channel: np.ndarray) -> np.ndarray:
         wval = float(0.25)
 
-        _, mask = cv2.threshold(s_channel, 0, 1, cv2.THRESH_BINARY)
+        _, mask = EnhancedImageColourTransferNode.__binary_threshold(s_channel, 0, 1)
         mask = mask.astype(np.uint8)
 
         s_mean_U = np.sum(s_channel*mask, axis= (0,1))/np.maximum(np.sum(mask, axis= (0,1)), 1) ## mean for element above 0
@@ -156,7 +156,7 @@ class EnhancedImageColourTransferNode:
         s_mean_L = np.sum(channel_L*w_L*inv_mask, axis= (0,1))/np.maximum(np.sum(inv_mask, axis= (0,1)), 1)/w_mean
 
 
-        _, mask = cv2.threshold(t_channel, 0, 1, cv2.THRESH_BINARY)
+        _, mask = EnhancedImageColourTransferNode.__binary_threshold(t_channel, 0, 1)
         mask = mask.astype(np.uint8)
 
         t_mean_U = np.sum(t_channel*mask, axis= (0,1))/np.maximum(np.sum(mask, axis= (0,1)), 1) ## mean for element above 0
@@ -214,8 +214,8 @@ class EnhancedImageColourTransferNode:
     @staticmethod
     def __adjust_saturation(img: np.ndarray, origin_img: np.ndarray, saturation_val: float = -1) -> np.ndarray:
         # Convert images from RGB to HSV color space
-        img: np.ndarray = cv2.cvtColor(img.astype(np.float32), cv2.COLOR_RGB2HSV)
-        origin_img: np.ndarray = cv2.cvtColor(origin_img.astype(np.float32), cv2.COLOR_RGB2HSV)
+        img: np.ndarray = EnhancedImageColourTransferNode.__rgb2hsv(img.astype(np.float32))
+        origin_img: np.ndarray = EnhancedImageColourTransferNode.__rgb2hsv(origin_img.astype(np.float32))
         if saturation_val < 0:
             # Calculate saturation_val as the ratio of the max saturation value
             # in the original image to the max value in the processed image
@@ -225,11 +225,10 @@ class EnhancedImageColourTransferNode:
 
         if saturation_val != 1.:
             # Compute weighted mix of the processed target and original saturation channels
-            # origin_img[...,1] = cv2.addWeighted(img[...,1], saturation_val, origin_img[...,1], 1 - saturation_val, 0.0)
             origin_img[...,1] = img[...,1]*(saturation_val) + origin_img[...,1]*(1-saturation_val)
 
             # Create a mask where the processed image's saturation exceeds the original target image's saturation
-            mask = cv2.threshold(img[...,1] - origin_img[...,1], 0, 1, cv2.THRESH_BINARY)[1]
+            mask = EnhancedImageColourTransferNode.__binary_threshold(img[...,1] - origin_img[...,1], 0, 1)[1]
             mask = mask.astype(np.uint8)
 
             # Create the modified reference saturation channel
@@ -237,15 +236,12 @@ class EnhancedImageColourTransferNode:
 
             # Match the mean and standard deviation of the processed image's saturation channel
             # to the modified reference saturation channel
-            # tmean, tdev = cv2.meanStdDev(img[...,1])
-            # tmpmean, tmpdev = cv2.meanStdDev(origin_img[...,1])
-
             tmean, tdev = img[...,1].mean((0,1)), img[...,1].std((0,1))
             tmpmean, tmpdev = origin_img[...,1].mean((0,1)), origin_img[...,1].std((0,1))
 
             tmp_ = img[...,1].copy().astype(np.float32)
             img[...,1] = (tmp_ - tmean) / tdev * tmpdev + tmpmean
-        img = cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
+        img = EnhancedImageColourTransferNode.__hsv2rgb(img)
 
         return img
 
@@ -319,3 +315,194 @@ class EnhancedImageColourTransferNode:
     @staticmethod
     def __rgb255_to_tensor(image: np.ndarray) -> torch.Tensor:
         return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+    def __transform(src: ArrayLike, m: ArrayLike) -> NDArray[np.float32]:
+        """
+        Pure NumPy replacement for cv2.transform.
+
+        Parameters
+        ----------
+        src : ArrayLike
+            Input array with shape (..., N), e.g. (H, W, N).
+        m : ArrayLike
+            Transformation matrix of shape (M, N) or (M, N+1).
+
+        Returns
+        -------
+        dst : NDArray[np.float32]
+            Transformed array with shape (..., M).
+        """
+        src_arr: NDArray[np.float32] = np.asarray(src, dtype=np.float32)
+        m_arr: NDArray[np.float32] = np.asarray(m, dtype=np.float32)
+
+        N = src_arr.shape[-1]
+        if m_arr.shape[1] == N:  # simple linear transform
+            dst = np.tensordot(src_arr, m_arr.T, axes=1)
+        elif m_arr.shape[1] == N + 1:  # affine transform
+            dst = np.tensordot(src_arr, m_arr[:, :-1].T, axes=1) + m_arr[:, -1]
+        else:
+            raise ValueError(
+                f"Matrix shape {m_arr.shape} incompatible with src shape {src_arr.shape}"
+            )
+
+        return dst.astype(np.float32)
+
+    def __mean_stddev(src: ArrayLike, mask: Optional[ArrayLike] = None) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
+        """
+        Pure NumPy replacement for cv2.meanStdDev.
+
+        Parameters
+        ----------
+        src : ArrayLike
+            Input array of shape (H, W[, C]) with 1 to 4 channels.
+        mask : Optional[ArrayLike], default=None
+            Optional mask of shape (H, W). Nonzero values indicate which
+            pixels are included in the calculation.
+
+        Returns
+        -------
+        mean : NDArray[np.float32]
+            Mean values per channel, shape (C, 1).
+        stddev : NDArray[np.float32]
+            Standard deviation per channel, shape (C, 1).
+        """
+        src_arr: NDArray[np.float32] = np.asarray(src, dtype=np.float32)
+
+        # Handle grayscale as single-channel
+        if src_arr.ndim == 2:
+            src_arr = src_arr[..., None]  # shape (H, W, 1)
+
+        H, W, C = src_arr.shape
+
+        if mask is not None:
+            mask_arr: NDArray[np.bool_] = np.asarray(mask, dtype=bool)
+            if mask_arr.shape != (H, W):
+                raise ValueError(f"Mask shape {mask_arr.shape} does not match src shape {(H, W)}")
+
+            # Apply mask to each channel
+            values = [src_arr[..., c][mask_arr] for c in range(C)]
+        else:
+            # Flatten all pixels per channel
+            values = [src_arr[..., c].ravel() for c in range(C)]
+
+        # Compute stats per channel
+        means = np.array([np.mean(v) if v.size > 0 else 0.0 for v in values], dtype=np.float32)
+        stds  = np.array([np.std(v)  if v.size > 0 else 0.0 for v in values], dtype=np.float32)
+
+        # Match OpenCV shape: (C, 1)
+        return means[:, None], stds[:, None]
+
+    def __binary_threshold(
+        src: ArrayLike,
+        thresh: float,
+        maxval: float
+    ) -> Tuple[float, NDArray[np.float32]]:
+        """
+        Pure NumPy replacement for cv2.threshold with THRESH_BINARY.
+
+        Parameters
+        ----------
+        src : ArrayLike
+            Input array (grayscale or multi-channel).
+        thresh : float
+            Threshold value.
+        maxval : float
+            Maximum value for THRESH_BINARY.
+
+        Returns
+        -------
+        retval : float
+            The used threshold value (same as OpenCV).
+        dst : NDArray[np.float32]
+            Thresholded output array, same shape as src.
+        """
+        src_arr: NDArray[np.float32] = np.asarray(src, dtype=np.float32)
+        dst = np.where(src_arr > thresh, maxval, 0).astype(np.float32)
+        return float(thresh), dst    
+
+    def __rgb2hsv(src: ArrayLike) -> NDArray[np.float32]:
+        """
+        Convert RGB image to HSV (OpenCV convention: H∈[0,180], S,V∈[0,255]).
+
+        Parameters
+        ----------
+        src : ArrayLike
+            Input RGB image, dtype uint8, shape (H, W, 3).
+
+        Returns
+        -------
+        dst : NDArray[np.uint8]
+            HSV image, same shape (H, W, 3).
+        """
+        src_arr = np.asarray(src, dtype=np.float32).astype(np.float32) / 255.0
+        r, g, b = src_arr[..., 0], src_arr[..., 1], src_arr[..., 2]
+
+        cmax = np.max(src_arr, axis=-1)
+        cmin = np.min(src_arr, axis=-1)
+        delta = cmax - cmin
+
+        # Hue
+        hue = np.zeros_like(cmax)
+        mask = delta > 1e-6
+        idx = (cmax == r) & mask
+        hue[idx] = ((g - b)[idx] / delta[idx]) % 6
+        idx = (cmax == g) & mask
+        hue[idx] = (b - r)[idx] / delta[idx] + 2
+        idx = (cmax == b) & mask
+        hue[idx] = (r - g)[idx] / delta[idx] + 4
+        hue = hue * 30  # scale to [0,180]
+
+        # Saturation
+        sat = np.zeros_like(cmax)
+        sat[cmax > 0] = (delta[cmax > 0] / cmax[cmax > 0]) * 255
+
+        # Value
+        val = cmax * 255
+
+        hsv = np.stack([hue, sat, val], axis=-1).astype(np.float32)
+        return hsv
+
+
+    def __hsv2rgb(src: ArrayLike) -> NDArray[np.float32]:
+        """
+        Convert HSV image (OpenCV convention) to RGB.
+
+        Parameters
+        ----------
+        src : ArrayLike
+            HSV image, dtype uint8, shape (H, W, 3).
+            H∈[0,180], S,V∈[0,255].
+
+        Returns
+        -------
+        dst : NDArray[np.uint8]
+            RGB image, same shape (H, W, 3).
+        """
+        hsv_arr = np.asarray(src, dtype=np.float32).astype(np.float32)
+        h = hsv_arr[..., 0] * 2.0  # back to [0,360)
+        s = hsv_arr[..., 1] / 255.0
+        v = hsv_arr[..., 2] / 255.0
+
+        c = v * s
+        x = c * (1 - np.abs((h / 60.0) % 2 - 1))
+        m = v - c
+
+        r = np.zeros_like(h)
+        g = np.zeros_like(h)
+        b = np.zeros_like(h)
+
+        idx = (0 <= h) & (h < 60)
+        r[idx], g[idx], b[idx] = c[idx], x[idx], 0
+        idx = (60 <= h) & (h < 120)
+        r[idx], g[idx], b[idx] = x[idx], c[idx], 0
+        idx = (120 <= h) & (h < 180)
+        r[idx], g[idx], b[idx] = 0, c[idx], x[idx]
+        idx = (180 <= h) & (h < 240)
+        r[idx], g[idx], b[idx] = 0, x[idx], c[idx]
+        idx = (240 <= h) & (h < 300)
+        r[idx], g[idx], b[idx] = x[idx], 0, c[idx]
+        idx = (300 <= h) & (h < 360)
+        r[idx], g[idx], b[idx] = c[idx], 0, x[idx]
+
+        rgb = np.stack([(r + m), (g + m), (b + m)], axis=-1)
+        return (rgb * 255).astype(np.float32)
