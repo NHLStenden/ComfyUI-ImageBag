@@ -348,69 +348,70 @@ class EnhancedImageColourTransferNode:
         # src: (B,H,W,3) in 0..255
         x = (src / 255.0).clamp(0.0, 1.0)
         r, g, b = x[..., 0], x[..., 1], x[..., 2]
-        cmax = torch.max(x, dim=-1).values
-        cmin = torch.min(x, dim=-1).values
+
+        cmax, _ = x.max(dim=-1)   # (...,)
+        cmin, _ = x.min(dim=-1)   # (...,)
         delta = cmax - cmin
 
-        hue = torch.zeros_like(cmax)
-        mask = delta > 1e-6
-        # Cases
-        r_is_max = (cmax == r) & mask
-        g_is_max = (cmax == g) & mask
-        b_is_max = (cmax == b) & mask
+        # Value (V)
+        val = cmax * 255.0
 
-        hue[r_is_max] = ((g - b)[r_is_max] / delta[r_is_max]) % 6.0
-        hue[g_is_max] = ((b - r)[g_is_max] / delta[g_is_max]) + 2.0
-        hue[b_is_max] = ((r - g)[b_is_max] / delta[b_is_max]) + 4.0
-        hue = hue * 30.0  # [0,180] like OpenCV
-
-        sat = torch.zeros_like(cmax)
-        nonzero = cmax > 0
-        sat[nonzero] = (delta[nonzero] / cmax[nonzero])
+        # Saturation (S)
+        sat = torch.where(cmax > 0, delta / cmax, torch.zeros_like(cmax))
         sat = sat * 255.0
 
-        val = cmax * 255.0
+        # Hue (H)
+        eps = 1e-6
+        rc = (g - b) / (delta + eps)        # if R is max
+        gc = (b - r) / (delta + eps) + 2.0  # if G is max
+        bc = (r - g) / (delta + eps) + 4.0  # if B is max
+
+        h_all = torch.stack([rc, gc, bc], dim=-1)    # (..., 3)
+        max_idx = x.argmax(dim=-1)                   # (...,)
+        hue = torch.gather(h_all, -1, max_idx.unsqueeze(-1)).squeeze(-1)
+
+        # If delta == 0 → hue undefined, set to 0
+        hue = torch.where(delta > eps, hue, torch.zeros_like(hue))
+
+        # Scale to OpenCV convention: H ∈ [0,180]
+        hue = (hue % 6.0) * 30.0
+
         return torch.stack([hue, sat, val], dim=-1)
 
     @staticmethod
     def __hsv2rgb(src: torch.Tensor) -> torch.Tensor:
         # src: (B,H,W,3) with H in [0,180], S,V in [0,255]
-        h = src[..., 0] * 2.0
+        h = src[..., 0] * 2.0          # [0, 360]
         s = src[..., 1] / 255.0
         v = src[..., 2] / 255.0
 
         c = v * s
-        h_ = h / 60.0
+        h_ = h / 60.0                  # [0, 6]
         x = c * (1.0 - torch.abs(h_ % 2 - 1.0))
         m = v - c
 
-        zeros = torch.zeros_like(h)
-        r = torch.zeros_like(h)
-        g = torch.zeros_like(h)
-        b = torch.zeros_like(h)
+        # Values we permute per sector: [c, x, 0]
+        vals = torch.stack([c, x, torch.zeros_like(c)], dim=-1)  # (..., 3)
 
-        conds = [
-            (h >= 0) & (h < 60),
-            (h >= 60) & (h < 120),
-            (h >= 120) & (h < 180),
-            (h >= 180) & (h < 240),
-            (h >= 240) & (h < 300),
-            (h >= 300) & (h < 360),
-        ]
-        rgbs = [
-            (c, x, zeros),
-            (x, c, zeros),
-            (zeros, c, x),
-            (zeros, x, c),
-            (x, zeros, c),
-            (c, zeros, x),
-        ]
-        for cond, (rc, gc, bc) in zip(conds, rgbs):
-            r = torch.where(cond, rc, r)
-            g = torch.where(cond, gc, g)
-            b = torch.where(cond, bc, b)
+        # Sector index per pixel in [0..5]
+        k = torch.floor(h_ % 6).to(torch.long)                   # shape (...,)
 
-        rgb = torch.stack([r + m, g + m, b + m], dim=-1) * 255.0
+        # For each sector, which indices from [c,x,0] map to [r',g',b']
+        patterns = torch.tensor([
+            [0, 1, 2],  # 0: (c, x, 0)
+            [1, 0, 2],  # 1: (x, c, 0)
+            [2, 0, 1],  # 2: (0, c, x)
+            [2, 1, 0],  # 3: (0, x, c)
+            [1, 2, 0],  # 4: (x, 0, c)
+            [0, 2, 1],  # 5: (c, 0, x)
+        ], device=src.device, dtype=torch.long)
+
+        # Build per-pixel gather indices with the same shape as vals (...,3)
+        idx = patterns[k]                                        # (..., 3), long
+
+        # Gather and add m
+        rgb = torch.gather(vals, dim=-1, index=idx)              # (..., 3)
+        rgb = (rgb + m.unsqueeze(-1)) * 255.0
         return rgb
 
     # ------------------- utility -------------------
